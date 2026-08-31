@@ -1,0 +1,849 @@
+diff --git a/src/App.jsx b/src/App.jsx
+index 4aee2e7..cfb2328 100644
+--- a/src/App.jsx
++++ b/src/App.jsx
+@@ -88,6 +88,7 @@ const TOPCOAT_T = [{id:"clear_varnish",label:"Clear Varnish",r:12},{id:"polyuret
+ const OIL_T     = [{id:"synthetic_enamel",label:"Synthetic Enamel",r:25},{id:"high_gloss",label:"High Gloss",r:30},{id:"oil_paint",label:"Oil Paint",r:28},{id:"duco_finish",label:"Duco Finish",r:55},{id:"custom",label:"Custom",r:0}];
+ const POLISH_T  = [{id:"melamine",label:"Melamine Polish",r:35},{id:"pu",label:"PU Polish",r:45},{id:"nc",label:"NC Polish",r:28},{id:"french",label:"French Polish",r:50},{id:"wood_stain",label:"Wood Stain",r:20},{id:"custom",label:"Custom",r:0}];
+ const TEXTURE_T = [{id:"roller",label:"Roller Texture",r:22},{id:"metallic",label:"Metallic Finish",r:50},{id:"venetian",label:"Venetian Finish",r:70},{id:"stucco",label:"Stucco Finish",r:35},{id:"custom",label:"Custom",r:0}];
++const WALLPAPER_T = [{id:"vinyl",label:"Vinyl Wallpaper",r:40},{id:"non_woven",label:"Non-Woven Wallpaper",r:55},{id:"fabric",label:"Fabric Wallpaper",r:80},{id:"custom",label:"Custom",r:0}];
+ const TEXTURE_TYPES_STANDALONE = TEXTURE_T; // alias used by TextureCard and AdminProjectDetail
+ const WP_ROLL_PRESETS = [
+   { id:"std",   label:"Standard 10m × 0.53m", w:0.53, l:10 },
+@@ -105,7 +106,7 @@ const FIN_META = {
+   oilPaint: { label:"Enamel / Trim",  icon:"🛢", types:OIL_T     },
+   polish:   { label:"Polish",      icon:"💅", types:POLISH_T  },
+   texture:  { label:"Texture",     icon:"🏔", types:TEXTURE_T },
+-  wallpaper:{ label:"Wallpaper",   icon:"🖼", types:[]        },
++  wallpaper:{ label:"Wallpaper",   icon:"🖼", types:WALLPAPER_T },
+ };
+ 
+ const EXT_PUTTY_T      = [{id:"white_cement_ext",label:"White Cement",r:8},{id:"exterior_putty",label:"Exterior Putty",r:12},{id:"custom",label:"Custom Putty",r:0}];
+@@ -122,6 +123,36 @@ const EXT_FIN_META = {
+   texture:    { label:"Decorative Finish",    icon:"🏔", types:EXT_TEXTURE_T    },
+ };
+ 
++// ── Dynamic Custom Finishes: merge user-added tiers (Master Rates Manager →
++//    "+ Add Custom Finish") into the static type lists above, live, on every
++//    render. This is what makes a custom finish (e.g. "Italian Marble
++//    Finish") show up in the room finish selectors immediately after it's
++//    saved, without a code change or reload. Read-only merge — the static
++//    FIN_META/EXT_FIN_META objects above stay as the built-in fallback.
++function mergeCustomFinishTypes(baseMeta, resolveCategoryKey) {
++  try {
++    const rates = getStoredMasterRates();
++    const merged = {};
++    for (const [subKey, cfg] of Object.entries(baseMeta)) {
++      const catKey = resolveCategoryKey(subKey);
++      const cat = rates.find(c => c.key === catKey);
++      const sub = cat && cat.subCategories.find(s => s.key === subKey);
++      const customTiers = sub ? sub.tiers.filter(t => t.isCustom) : [];
++      if (!customTiers.length) { merged[subKey] = cfg; continue; }
++      const idx = cfg.types.findIndex(t => t.id === "custom");
++      const newTypes = idx === -1
++        ? [...cfg.types, ...customTiers]
++        : [...cfg.types.slice(0, idx), ...customTiers, ...cfg.types.slice(idx)];
++      merged[subKey] = { ...cfg, types: newTypes };
++    }
++    return merged;
++  } catch {
++    return baseMeta;
++  }
++}
++function getFinMeta() { return mergeCustomFinishTypes(FIN_META, k => FIN_CATEGORY_MAP[k] || "interior"); }
++function getExtFinMeta() { return mergeCustomFinishTypes(EXT_FIN_META, () => "exterior"); }
++
+ const CONSUMPTION_DEFAULTS = {
+   paint:    { coverage:80,  wastage:10, packSize:4,  ratePerL:350 },
+   oilPaint: { coverage:60,  wastage:10, packSize:1,  ratePerL:300 },
+@@ -288,7 +319,7 @@ function defFinishing(pkg = "premium") {
+     oilPaint: { on:false, type:"synthetic_enamel", customName:"", rate:0,         coats:2, area:0, useRoom:false, consumption:defConsumptionObj("oilPaint") },
+     polish:   { on:false, type:"melamine",          customName:"", rate:0,         coats:2, area:0, useRoom:false, consumption:defConsumptionObj("polish")   },
+     texture:  { on:false, type:"roller",            customName:"", rate:0,         coats:1, area:0, useRoom:false, consumption:defConsumptionObj("texture")  },
+-    wallpaper:{ on:false, type:"",                  customName:"", rate:0,         coats:1, area:0, useRoom:false, installRate:0, rollSize:"", consumption:null },
++    wallpaper:{ on:false, type:"vinyl",             customName:"", rate:40,        coats:1, area:0, useRoom:false, installRate:0, rollSize:"", designName:"", basis:"sf", rollPreset:"std", ratePerRoll:0, consumption:null },
+   };
+ }
+ function defExteriorFinishing(pkg = "premium") {
+@@ -397,7 +428,20 @@ function newRoom(type, pkg, brand) {
+     labourMethod:"sqft", dailyRate:0, workers:1, days:1 };
+ }
+ function newFloor(name, pkg, brand) { return { id:uid(), name, rooms:[newRoom("Living Room", pkg, brand)] }; }
+-function defSectionCharges() { return { additionalCharges:0, discount:0, gst:0 }; }
++function defSectionCharges() {
++  return {
++    additionalCharges:0, discount:0, gst:0,
++    // Material Wastage buffer — % of material cost added to cover on-site
++    // spillage/offcuts. Off by default; 5% is the suggested starting value.
++    wastageOn:false, wastagePct:5,
++    // Scaffolding surcharge — % of (material+labour) added for elevated/
++    // exterior work requiring scaffolding access.
++    scaffoldingOn:false, scaffoldingPct:8,
++    // Surface Condition surcharge — applied automatically when
++    // project.projectType==="repaint" (Fresh jobs get no surcharge).
++    repaintSurchargePct:15,
++  };
++}
+ function defExteriorConfig() {
+   return { package:"premium", brand:"asian", customBrand:"", labourRate:PACKAGES["premium"].labour, labourRateExcl:PACKAGES["premium"].labourExcl, labourMethod:"sqft", dailyRate:0, workers:1, days:1, finishing:defExteriorFinishing("premium") };
+ }
+@@ -448,11 +492,30 @@ function calcNet(r) {
+   const open  = (r.openings||[]).reduce((s,o) => { const a=(o.w||0)*(o.h||0)*(o.count||1); return s+(o.mode==="add"?-a:a); }, 0);
+   return Math.max(0, walls + extra + ceil - open);
+ }
++// ── Wallpaper Per SF / Per Roll estimation ──────────────────────────────
++// Shared by the FinishingModule cost preview and calcFinCost (money totals)
++// so the on-screen number and the actual quote total never disagree.
++const SQM_TO_SQFT = 10.7639;
++function calcWallpaperRollArea(f) {
++  const preset = WP_ROLL_PRESETS.find(p=>p.id===(f.rollPreset||"std")) || WP_ROLL_PRESETS[0];
++  const w = f.rollPreset==="custom" ? (f.rollW||preset.w) : preset.w;
++  const l = f.rollPreset==="custom" ? (f.rollL||preset.l) : preset.l;
++  return (w||0)*(l||0)*SQM_TO_SQFT;
++}
++function calcWallpaperRolls(f, area) {
++  const rollAreaSf = calcWallpaperRollArea(f);
++  return rollAreaSf>0 ? Math.ceil((area||0)/rollAreaSf) : 0;
++}
++function calcWallpaperMaterialCost(f, area) {
++  if ((f.basis||"sf")==="roll") return calcWallpaperRolls(f, area)*(f.ratePerRoll||0);
++  return (f.rate||0)*area;
++}
+ function calcFinCost(fin, net) {
+   return Object.entries(fin).reduce((s,[k,f]) => {
+     if (!f.on) return s;
+     const a = f.useRoom ? net : (f.area||0);
+-    return s + (f.rate||0)*(f.coats||1)*a + (k==="wallpaper" ? (f.installRate||0)*a : 0);
++    if (k==="wallpaper") return s + calcWallpaperMaterialCost(f,a) + (f.installRate||0)*a;
++    return s + (f.rate||0)*(f.coats||1)*a;
+   }, 0);
+ }
+ function calcRoom(r) {
+@@ -633,13 +696,31 @@ function calcExteriorConfiguredTotals(exterior, globalConfig, quoteMode) {
+ 
+   return { area, material, labour, total:material+labour, elevations };
+ }
+-function calcSectionTotal(mat, lab, charges) {
+-  const { additionalCharges=0, discount=0, gst=0 } = charges||{};
+-  const sub = mat+lab+additionalCharges;
++// Section totals: Material Wastage buffer → Surface Condition (Fresh/Repaint)
++// surcharge → Scaffolding surcharge → additional charges → Discount → GST,
++// applied in that order so each later step compounds on the adjusted base.
++// projectType comes from project.projectType ("fresh" | "repaint"); Fresh
++// jobs never get the repaint surcharge regardless of repaintSurchargePct.
++function calcSectionTotal(mat, lab, charges, projectType="fresh") {
++  const {
++    additionalCharges=0, discount=0, gst=0,
++    wastageOn=false, wastagePct=5,
++    scaffoldingOn=false, scaffoldingPct=8,
++    repaintSurchargePct=15,
++  } = charges||{};
++
++  const wastageAmt = wastageOn ? mat*(wastagePct/100) : 0;
++  const matWithWastage = mat+wastageAmt;
++
++  const conditionAmt = projectType==="repaint" ? (matWithWastage+lab)*(repaintSurchargePct/100) : 0;
++
++  const scaffoldingAmt = scaffoldingOn ? (matWithWastage+lab+conditionAmt)*(scaffoldingPct/100) : 0;
++
++  const sub = matWithWastage+lab+conditionAmt+scaffoldingAmt+additionalCharges;
+   const discountAmt = sub*discount/100;
+   const afterDiscount = sub-discountAmt;
+   const gstAmt = afterDiscount*gst/100;
+-  return { sub, discountAmt, afterDiscount, gstAmt, total:afterDiscount+gstAmt };
++  return { sub, wastageAmt, conditionAmt, scaffoldingAmt, discountAmt, afterDiscount, gstAmt, total:afterDiscount+gstAmt };
+ }
+ function calcDWItem(it) {
+   const area=(it.w||0)*(it.h||0)*(it.qty||1);
+@@ -984,9 +1065,10 @@ function FinishingModule({ finishing, onChange, net, visibleKeys=null, showNetLa
+   const [openMap,setOpenMap]=useState({});
+   const tog=k=>setOpenMap(p=>({...p,[k]:!p[k]}));
+   const upF=(k,f,v)=>{ if(locked) return; onChange({...finishing,[k]:{...finishing[k],[f]:v}}); };
++  const liveFinMeta=getFinMeta(); // includes any custom finishes added via Master Rates Manager
+   const changeType=(k,typeId)=>{
+     if(locked) return;
+-    const types=FIN_META[k]?.types||[];
++    const types=liveFinMeta[k]?.types||[];
+     const t=types.find(x=>x.id===typeId)||types[0];
+     const catKey=FIN_CATEGORY_MAP[k]||"interior";
+     const masterRate=getRateForFinish(catKey,typeId,k);
+@@ -994,7 +1076,7 @@ function FinishingModule({ finishing, onChange, net, visibleKeys=null, showNetLa
+   };
+   // When a rate is edited in Unlocked mode, persist to master rates.
+   const upFRate=(k,v)=>{ if(locked) return; const f=finishing[k]||{}; onChange({...finishing,[k]:{...f,rate:v}}); persistFinishRate(k,f.type,v); };
+-  const finMetaEntries=Object.entries(FIN_META).filter(([key])=>!visibleKeys||visibleKeys.includes(key));
++  const finMetaEntries=Object.entries(liveFinMeta).filter(([key])=>!visibleKeys||visibleKeys.includes(key));
+   return <div>
+     {showNetLabel&&<div style={{fontSize:12,color:"#aaa",marginBottom:12}}>Net area: <b style={{color:C.orange}}>{net.toFixed(2)} sq ft</b></div>}
+     {finMetaEntries.map(([key,cfg])=>{
+@@ -1002,7 +1084,9 @@ function FinishingModule({ finishing, onChange, net, visibleKeys=null, showNetLa
+       const types=cfg.types;
+       const selT=types.find(t=>t.id===f.type)||types[0];
+       const area=f.useRoom?net:(f.area||0);
+-      const cost=(f.rate||0)*(f.coats||1)*area+(key==="wallpaper"?(f.installRate||0)*area:0);
++      const cost=key==="wallpaper"
++        ? calcWallpaperMaterialCost(f,area)+(f.installRate||0)*area
++        : (f.rate||0)*(f.coats||1)*area;
+       const isOpen=openMap[key];
+       return <div key={key} style={{borderRadius:12,border:`1.5px solid ${f.on?C.orange:C.border}`,marginBottom:8,overflow:"hidden"}}>
+         <div style={{display:"flex",alignItems:"center",gap:10,padding:"11px 14px",background:f.on?C.orangeL:C.white,cursor:locked?"not-allowed":"pointer"}} onClick={()=>{if(locked)return;if(!f.on)upF(key,"on",true);tog(key);}}>
+@@ -1010,32 +1094,50 @@ function FinishingModule({ finishing, onChange, net, visibleKeys=null, showNetLa
+           <span style={{fontSize:17}}>{cfg.icon}</span>
+           <div style={{flex:1}}>
+             <div style={{fontSize:13,fontWeight:800,color:f.on?C.navy:"#aaa"}}>{cfg.label}</div>
+-            {f.on&&<div style={{fontSize:10,color:"#888",marginTop:1}}>{selT?.label||""} · {f.coats||1} coat(s) · ₹{cost.toFixed(0)}</div>}
++            {f.on&&<div style={{fontSize:10,color:"#888",marginTop:1}}>{selT?.label||""}{key!=="wallpaper"&&` · ${f.coats||1} coat(s)`} · ₹{cost.toFixed(0)}</div>}
+           </div>
+           <span style={{fontSize:11,color:"#bbb",transform:isOpen?"rotate(180deg)":"",transition:"transform .2s"}}>▾</span>
+         </div>
+         {f.on&&isOpen&&<div style={{padding:"12px 14px",background:C.white,borderTop:`1px solid ${C.border}`}}>
+           {key==="wallpaper"
+-            ?<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+-              <Inp label="Type / Design" value={f.type||""} onChange={v=>upF(key,"type",v)} placeholder="e.g. Floral" disabled={locked}/>
+-              <Inp label="Roll Size" value={f.rollSize||""} onChange={v=>upF(key,"rollSize",v)} placeholder="e.g. 10m×0.53m" disabled={locked}/>
+-            </div>
++            ?<>
++              {types.length>0&&<DropSel label="Material" value={f.type||types[0]?.id} onChange={v=>changeType(key,v)} options={types.map(t=>({value:t.id,label:t.label}))} style={{marginBottom:10}} disabled={locked}/>}
++              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
++                <Inp label="Design / Pattern (optional)" value={f.designName||""} onChange={v=>upF(key,"designName",v)} placeholder="e.g. Floral" disabled={locked}/>
++                {(f.basis||"sf")==="roll"
++                  ?<DropSel label="Roll Size" value={f.rollPreset||"std"} onChange={v=>upF(key,"rollPreset",v)} options={WP_ROLL_PRESETS.map(p=>({value:p.id,label:p.label}))} disabled={locked}/>
++                  :<Inp label="Roll Size (ref.)" value={f.rollSize||""} onChange={v=>upF(key,"rollSize",v)} placeholder="e.g. 10m×0.53m" disabled={locked}/>}
++              </div>
++              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
++                <span style={{fontSize:11,color:"#555",fontWeight:600}}>Estimate By:</span>
++                {[["sf","Per SF"],["roll","Per Roll"]].map(([val,lbl])=><button key={val} disabled={locked} onClick={()=>upF(key,"basis",val)} style={{padding:"3px 10px",borderRadius:20,fontSize:11,fontWeight:700,border:`1.5px solid ${(f.basis||"sf")===val?C.navy:C.border}`,background:(f.basis||"sf")===val?C.navy:C.white,color:(f.basis||"sf")===val?"#fff":"#888",cursor:locked?"not-allowed":"pointer",opacity:locked?0.6:1}}>{lbl}</button>)}
++              </div>
++            </>
+             :types.length>0&&<DropSel label="Type / Variant" value={f.type||types[0]?.id} onChange={v=>changeType(key,v)} options={types.map(t=>({value:t.id,label:t.label+(t.base?` (${t.base==="water"?"Water":"Oil"}-based)`:"")})) } style={{marginBottom:10}} disabled={locked}/>}
+-          {(f.type==="custom"||key==="wallpaper")&&<div style={{marginBottom:10}}><Inp label="Material Name" value={f.customName||""} onChange={v=>upF(key,"customName",v)} placeholder="Enter name..." disabled={locked}/></div>}
++          {f.type==="custom"&&<div style={{marginBottom:10}}><Inp label="Custom Material Name" value={f.customName||""} onChange={v=>upF(key,"customName",v)} placeholder="Enter name..." disabled={locked}/></div>}
+           {selT?.base&&<div style={{background:selT.base==="water"?C.blueL:"#FFF7ED",borderRadius:8,padding:"5px 10px",marginBottom:10,fontSize:11,color:selT.base==="water"?C.blue:C.gold,fontWeight:600}}>{selT.base==="water"?"💧 Water-Based":"🛢 Oil-Based"}</div>}
+           <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+             <span style={{fontSize:11,color:"#555",fontWeight:600}}>Area:</span>
+             {["Room Net","Custom"].map((lbl,i)=><button key={lbl} disabled={locked} onClick={()=>upF(key,"useRoom",i===0)} style={{padding:"3px 10px",borderRadius:20,fontSize:11,fontWeight:700,border:`1.5px solid ${(i===0?f.useRoom:!f.useRoom)?C.navy:C.border}`,background:(i===0?f.useRoom:!f.useRoom)?C.navy:C.white,color:(i===0?f.useRoom:!f.useRoom)?"#fff":"#888",cursor:locked?"not-allowed":"pointer",opacity:locked?0.6:1}}>{lbl}</button>)}
+           </div>
+           {!f.useRoom&&<div style={{marginBottom:10}}><span style={LBL}>CUSTOM AREA (sf)</span><NumInp small value={f.area||0} onChange={v=>upF(key,"area",v)} disabled={locked}/></div>}
+-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+-            <div><span style={LBL}>RATE (₹/sf){locked?" 🔒":""}</span><NumInp small prefix="₹" value={f.rate||0} onChange={v=>upFRate(key,v)} disabled={locked}/></div>
+-            <div><span style={LBL}>{key==="wallpaper"?"INSTALL (₹/sf)":"COATS"}</span>
+-              {key==="wallpaper"?<NumInp small prefix="₹" value={f.installRate||0} onChange={v=>upF(key,"installRate",v)} disabled={locked}/>:<CoatStepper value={f.coats||1} onChange={v=>upF(key,"coats",v)} disabled={locked}/>}
++          {key==="wallpaper"&&(f.basis||"sf")==="roll"
++            ?<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
++              <div><span style={LBL}>RATE / ROLL{locked?" 🔒":""}</span><NumInp small prefix="₹" value={f.ratePerRoll||0} onChange={v=>upF(key,"ratePerRoll",v)} disabled={locked}/></div>
++              <div><span style={LBL}>INSTALL (₹/sf)</span><NumInp small prefix="₹" value={f.installRate||0} onChange={v=>upF(key,"installRate",v)} disabled={locked}/></div>
+             </div>
+-          </div>
++            :<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
++              <div><span style={LBL}>RATE (₹/sf){locked?" 🔒":""}</span><NumInp small prefix="₹" value={f.rate||0} onChange={v=>upFRate(key,v)} disabled={locked}/></div>
++              <div><span style={LBL}>{key==="wallpaper"?"INSTALL (₹/sf)":"COATS"}</span>
++                {key==="wallpaper"?<NumInp small prefix="₹" value={f.installRate||0} onChange={v=>upF(key,"installRate",v)} disabled={locked}/>:<CoatStepper value={f.coats||1} onChange={v=>upF(key,"coats",v)} disabled={locked}/>}
++              </div>
++            </div>}
+           <div style={{background:C.orangeL,borderRadius:8,padding:"8px 12px",marginTop:10,display:"flex",justifyContent:"space-between"}}>
+-            <span style={{fontSize:11,color:"#c97a40",fontWeight:600}}>{area.toFixed(1)} sf × ₹{f.rate||0} × {f.coats||1}</span>
++            <span style={{fontSize:11,color:"#c97a40",fontWeight:600}}>
++              {key==="wallpaper"&&(f.basis||"sf")==="roll"
++                ?`${area.toFixed(1)} sf → ${calcWallpaperRolls(f,area)} roll(s) × ₹${f.ratePerRoll||0}`
++                :`${area.toFixed(1)} sf × ₹${f.rate||0} × ${f.coats||1}`}
++            </span>
+             <span style={{fontSize:15,fontWeight:800,color:C.orange}}>₹{cost.toFixed(0)}</span>
+           </div>
+           {CONSUMPTION_ENABLED.includes(key)&&<ConsumptionPanel f={f} net={net} onChange={upd=>onChange({...finishing,[key]:upd})}/>}
+@@ -1050,14 +1152,15 @@ function ExteriorFinishingModule({ finishing, onChange, net, locked=false }) {
+   const [openMap,setOpenMap]=useState({});
+   const tog=k=>setOpenMap(p=>({...p,[k]:!p[k]}));
+   const upF=(k,f,v)=>{ if(locked) return; onChange({...finishing,[k]:{...finishing[k],[f]:v}}); };
++  const liveExtFinMeta=getExtFinMeta(); // includes any custom finishes added via Master Rates Manager
+   const changeType=(k,typeId)=>{
+     if(locked) return;
+-    const types=EXT_FIN_META[k]?.types||[];
++    const types=liveExtFinMeta[k]?.types||[];
+     const t=types.find(x=>x.id===typeId)||types[0];
+     const masterRate=getRateForFinish("exterior",typeId,k);
+     onChange({...finishing,[k]:{...finishing[k],type:typeId,rate:masterRate||t?.r||0}});
+   };
+-  const entries=Object.entries(EXT_FIN_META);
++  const entries=Object.entries(liveExtFinMeta);
+   return <div>
+     <div style={{fontSize:11,color:C.gray,fontWeight:600,marginBottom:14}}>Net exterior area: <b style={{color:C.orange}}>{net.toFixed(2)} sq ft</b></div>
+ 
+@@ -3231,7 +3334,7 @@ function buildMaterialConsumptionSummary(project) {
+         const area = f.useRoom ? net : (f.area||0);
+         const c = f.consumption;
+         const auto = calcConsumption(area, f.coats||1, c.coverage, c.wastage, c.packSize, c.ratePerL);
+-        const meta = FIN_META[key];
++        const meta = getFinMeta()[key];
+         const typeLabel = meta?.types?.find(t=>t.id===f.type)?.label;
+         raw.push({
+           category:"Interior", material: typeLabel || (meta?meta.label:key),
+@@ -3257,7 +3360,7 @@ function buildMaterialConsumptionSummary(project) {
+       const area = f.useRoom ? net : (f.area||0);
+       const c = f.consumption;
+       const auto = calcConsumption(area, f.coats||1, c.coverage, c.wastage, c.packSize, c.ratePerL);
+-      const meta = EXT_FIN_META[key];
++      const meta = getExtFinMeta()[key];
+       const typeLabel = meta?.types?.find(t=>t.id===f.type)?.label;
+       raw.push({
+         category:"Exterior", material: typeLabel || (meta?meta.label:key),
+@@ -3461,7 +3564,7 @@ function getProjectServiceTotals(project) {
+   // Interior — charges applied to Interior's own base only
+   const pt = projectTotals(project);
+   const intMat = pt.mat, intLab = withMat ? pt.lab : pt.labEx, intNet = pt.net;
+-  const intChargeCalc = calcSectionTotal(intMat, intLab, project.interiorCharges || defSectionCharges());
++  const intChargeCalc = calcSectionTotal(intMat, intLab, project.interiorCharges || defSectionCharges(), project.projectType);
+ 
+   // Exterior — charges applied to Exterior's own base only
+   // PAINT-EXT-002D: aggregated per-elevation (falls back to identical numbers to the old
+@@ -3470,7 +3573,7 @@ function getProjectServiceTotals(project) {
+   const extNet = extConfigured.area;
+   const extMat = extConfigured.material;
+   const extLab = extConfigured.labour;
+-  const extChargeCalc = calcSectionTotal(extMat, extLab, project.exteriorCharges || defSectionCharges());
++  const extChargeCalc = calcSectionTotal(extMat, extLab, project.exteriorCharges || defSectionCharges(), project.projectType);
+ 
+   // Polish / Enamel
+   const polishCalc = calcPolish(project.polishItems || []);
+@@ -3484,7 +3587,7 @@ function getProjectServiceTotals(project) {
+   // Texture
+   const txCalc = calcTexture(project.TX2_textureItems || []);
+ 
+-  const interior   = { area: Number(intNet)||0,         total: Number(intChargeCalc.total)||0 };
++  const interior   = { area: Number(intNet)||0, material: Number(intMat)||0, labour: Number(intLab)||0, total: Number(intChargeCalc.total)||0 };
+   const exterior   = { area: Number(extNet)||0, material: Number(extMat)||0, labour: Number(extLab)||0, total: Number(extChargeCalc.total)||0 };
+   const polish     = { area: Number(polishCalc.net)||0,  total: Number(polishCalc.total)||0 };
+   const doorwindow = { area: Number(dwCalc.area)||0,     total: Number(dwCalc.total)||0 };
+@@ -3505,6 +3608,13 @@ function getProjectServiceTotals(project) {
+   const discountAmount = (Number(intChargeCalc.discountAmt)||0) + (Number(extChargeCalc.discountAmt)||0);
+   const taxableAmount = (Number(intChargeCalc.afterDiscount)||0) + (Number(extChargeCalc.afterDiscount)||0) + polish.total + doorwindow.total + wallpaper.total + texture.total;
+   const gstAmount = (Number(intChargeCalc.gstAmt)||0) + (Number(extChargeCalc.gstAmt)||0);
++  // Scaffolding / Wastage / Surface-Condition surcharges are already folded into
++  // intChargeCalc.sub/extChargeCalc.sub (and therefore into combinedSubtotal,
++  // taxableAmount, gstAmount, grandTotal above) — these are exposed separately
++  // purely so the Invoice/Quote Summary can show them as their own line items.
++  const wastageAmount = (Number(intChargeCalc.wastageAmt)||0) + (Number(extChargeCalc.wastageAmt)||0);
++  const surfaceConditionAmount = (Number(intChargeCalc.conditionAmt)||0) + (Number(extChargeCalc.conditionAmt)||0);
++  const scaffoldingAmount = (Number(intChargeCalc.scaffoldingAmt)||0) + (Number(extChargeCalc.scaffoldingAmt)||0);
+   const intGstPct = Number((project.interiorCharges||{}).gst)||0;
+   const extGstPct = Number((project.exteriorCharges||{}).gst)||0;
+   const gstPct = intGstPct>0?intGstPct:(extGstPct>0?extGstPct:0);
+@@ -3517,6 +3627,7 @@ function getProjectServiceTotals(project) {
+     interior, exterior, polish, doorwindow, wallpaper, texture, grandArea, grandTotal,
+     intChargeCalc, extChargeCalc,
+     combinedSubtotal, additionalCharges, discountPct, discountAmount, taxableAmount, gstAmount, gstPct, finalTotal,
++    wastageAmount, surfaceConditionAmount, scaffoldingAmount, projectType: project.projectType,
+     exteriorBreakdown: extConfigured.elevations
+   };
+ }
+@@ -4827,9 +4938,10 @@ function ExteriorModule({ elevations, onChange, config, onConfigChange, quoteMod
+ }
+ 
+ // ─── SECTION SUMMARY CARD ─────────────────────────────────────────
+-function SectionSummaryCard({ title, icon, net, mat, lab, charges, onChargesChange, color, colorL }) {
+-  const { additionalCharges=0, discount=0, gst=0 } = charges||{};
+-  const calc=calcSectionTotal(mat,lab,charges);
++function SectionSummaryCard({ title, icon, net, mat, lab, charges, onChargesChange, color, colorL, projectType="fresh" }) {
++  const { additionalCharges=0, discount=0, gst=0, wastageOn=false, wastagePct=5, scaffoldingOn=false, scaffoldingPct=8, repaintSurchargePct=15 } = charges||{};
++  const calc=calcSectionTotal(mat,lab,charges,projectType);
++  const isRepaint = projectType==="repaint";
+   return <div style={{borderRadius:14,border:`1.5px solid ${color}33`,overflow:"hidden",marginBottom:10}}>
+     <div style={{background:color,padding:"7px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+       <span style={{fontSize:13,fontWeight:800,color:"#fff"}}>{icon} {title}</span>
+@@ -4840,13 +4952,57 @@ function SectionSummaryCard({ title, icon, net, mat, lab, charges, onChargesChan
+         <div key={l} style={{display:"flex",justifyContent:"space-between",fontSize:11,padding:"2px 0",color:"#555"}}><span style={{fontWeight:600}}>{l}</span><span style={{fontWeight:700}}>{v}</span></div>
+       ))}
+       <div style={{borderTop:`1px dashed ${color}44`,margin:"6px 0"}}/>
++
++      {/* Surface Condition — read from project.projectType (Fresh/Repaint), set on the Project tab.
++          Repaint automatically applies the surcharge % below; Fresh applies nothing. */}
++      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8,background:isRepaint?C.orangeL:"#F0FDF4",borderRadius:8,padding:"6px 10px"}}>
++        <span style={{fontSize:10.5,fontWeight:700,color:isRepaint?C.orange:C.green}}>{isRepaint?"🔄 Repaint — surcharge applied":"🎨 Fresh — no condition surcharge"}</span>
++        {isRepaint&&<div style={{display:"flex",alignItems:"center",gap:4}}>
++          <NumInp small value={repaintSurchargePct} onChange={v=>onChargesChange({...charges,repaintSurchargePct:v})}/>
++          <span style={{fontSize:10,color:C.gray,fontWeight:700}}>%</span>
++        </div>}
++      </div>
++
++      {/* Material Wastage buffer */}
++      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
++        <label style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer"}}>
++          <input type="checkbox" checked={!!wastageOn} onChange={e=>onChargesChange({...charges,wastageOn:e.target.checked})} style={{width:14,height:14,accentColor:color,cursor:"pointer"}}/>
++          <span style={{fontSize:10.5,fontWeight:700,color:"#555"}}>Material Wastage Buffer</span>
++        </label>
++        {wastageOn&&<div style={{display:"flex",alignItems:"center",gap:4}}>
++          <NumInp small value={wastagePct} onChange={v=>onChargesChange({...charges,wastagePct:v})}/>
++          <span style={{fontSize:10,color:C.gray,fontWeight:700}}>%</span>
++        </div>}
++      </div>
++
++      {/* Scaffolding surcharge */}
++      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
++        <label style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer"}}>
++          <input type="checkbox" checked={!!scaffoldingOn} onChange={e=>onChargesChange({...charges,scaffoldingOn:e.target.checked})} style={{width:14,height:14,accentColor:color,cursor:"pointer"}}/>
++          <span style={{fontSize:10.5,fontWeight:700,color:"#555"}}>Scaffolding Surcharge</span>
++        </label>
++        {scaffoldingOn&&<div style={{display:"flex",alignItems:"center",gap:4}}>
++          <NumInp small value={scaffoldingPct} onChange={v=>onChargesChange({...charges,scaffoldingPct:v})}/>
++          <span style={{fontSize:10,color:C.gray,fontWeight:700}}>%</span>
++        </div>}
++      </div>
++
+       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:8}}>
+         <div><span style={{...LBL,fontSize:9}}>ADD. CHARGES</span><NumInp small prefix="₹" value={additionalCharges} onChange={v=>onChargesChange({...charges,additionalCharges:v})}/></div>
+         <div><span style={{...LBL,fontSize:9}}>DISCOUNT (%)</span><NumInp small value={discount} onChange={v=>onChargesChange({...charges,discount:v})}/></div>
+         <div><span style={{...LBL,fontSize:9}}>GST (%)</span><NumInp small value={gst} onChange={v=>onChargesChange({...charges,gst:v})}/></div>
+       </div>
+       <div style={{background:C.white,borderRadius:10,padding:"7px 10px"}}>
+-        {[["Subtotal",`₹${calc.sub.toFixed(0)}`],[`Discount (${discount}%)`,`−₹${calc.discountAmt.toFixed(0)}`],["Taxable Amount",`₹${calc.afterDiscount.toFixed(0)}`],[`GST (${gst}%)`,`₹${calc.gstAmt.toFixed(0)}`]].map(([l,v])=>(
++        {[
++          ["Material (+ Wastage)",`₹${(mat+calc.wastageAmt).toFixed(0)}`],
++          ["Labour",`₹${lab.toFixed(0)}`],
++          ...(calc.conditionAmt>0?[[`Repaint Surcharge (${repaintSurchargePct}%)`,`₹${calc.conditionAmt.toFixed(0)}`]]:[]),
++          ...(calc.scaffoldingAmt>0?[[`Scaffolding (${scaffoldingPct}%)`,`₹${calc.scaffoldingAmt.toFixed(0)}`]]:[]),
++          ["Subtotal",`₹${calc.sub.toFixed(0)}`],
++          [`Discount (${discount}%)`,`−₹${calc.discountAmt.toFixed(0)}`],
++          ["Taxable Amount",`₹${calc.afterDiscount.toFixed(0)}`],
++          [`GST (${gst}%)`,`₹${calc.gstAmt.toFixed(0)}`],
++        ].map(([l,v])=>(
+           <div key={l} style={{display:"flex",justifyContent:"space-between",fontSize:10.5,padding:"1.5px 0",color:"#777"}}><span>{l}</span><span style={{fontWeight:600}}>{v}</span></div>
+         ))}
+         <div style={{borderTop:`1px solid ${color}33`,marginTop:4,paddingTop:4,display:"flex",justifyContent:"space-between"}}>
+@@ -5275,9 +5431,9 @@ function AdminProjectDetail({ p, onClose }) {
+   const extFin = ec.finishing||defExteriorFinishing(ec.package);
+   const extMat = wm?calcExteriorMaterialCost(extFin,extNet):0;
+   const extLab = wm?calcExteriorLabourCost(ec,extNet):calcExteriorLabourCostExcl(ec,extNet);
+-  const extCalc = calcSectionTotal(extMat,extLab,p.exteriorCharges||defSectionCharges());
++  const extCalc = calcSectionTotal(extMat,extLab,p.exteriorCharges||defSectionCharges(),p.projectType);
+   const intMat = pt.mat; const intLab = wm?pt.lab:pt.labEx;
+-  const intCalc = calcSectionTotal(intMat,intLab,p.interiorCharges||defSectionCharges());
++  const intCalc = calcSectionTotal(intMat,intLab,p.interiorCharges||defSectionCharges(),p.projectType);
+   const dwT = calcDWTotals(p.dwItems||[]);
+   const wpT = calcWPTotals(p.wpItems||[]);
+   const txT = calcTextureTotals(p.textureItems||[]);
+@@ -5736,7 +5892,7 @@ function generatePDF(project) {
+   const EXT_FIN_ICONS_PDF={putty:"",primer:"",paint:"",protection:"",texture:""};
+   const intT=projectTotals(project);
+   const intMat=intT.mat,intLab=withMat?intT.lab:intT.labEx,intNet=intT.net;
+-  const intC=calcSectionTotal(intMat,intLab,project.interiorCharges||defSectionCharges());
++  const intC=calcSectionTotal(intMat,intLab,project.interiorCharges||defSectionCharges(),project.projectType);
+   const polishPDF=calcPolish(project.polishItems||[]);
+   const mtPDF=project.measureType||"interior";
+   const isDoorWindowPDF=mtPDF==="doorwindow";
+@@ -5758,7 +5914,7 @@ function generatePDF(project) {
+   const FIN_TYPE_LISTS_PDF={putty:PUTTY_T,primer:PRIMER_T,paint:PAINT_T,topcoat:TOPCOAT_T,oilPaint:OIL_T};
+   const finLabelPDF=(k,f)=>{
+     if(f.customName) return esc(f.customName);
+-    const list=FIN_TYPE_LISTS_PDF[k];
++    const list=getFinMeta()[k]?.types;
+     const found=list&&list.find(t=>t.id===f.type);
+     if(found) return esc(found.label);
+     const CAT_LABEL_PDF={putty:"Putty",primer:"Primer",paint:"Paint",topcoat:"Topcoat",oilPaint:"Oil Paint",polish:"Polish",texture:"Texture",wallpaper:"Wallpaper"};
+@@ -5793,7 +5949,7 @@ function generatePDF(project) {
+ 
+   const extFinLabelPDF=(k,f)=>{
+     if(f.customName) return esc(f.customName);
+-    const types=(EXT_FIN_META[k]&&EXT_FIN_META[k].types)||[];
++    const types=(getExtFinMeta()[k]&&getExtFinMeta()[k].types)||[];
+     const found=types.find(t=>t.id===f.type);
+     if(found) return esc(found.label);
+     const EXT_CAT_LABEL_PDF={putty:"Exterior Putty",primer:"Exterior Primer",paint:"Exterior Paint",protection:"Protection Coating",texture:"Exterior Texture"};
+@@ -6067,13 +6223,13 @@ export default function App() {
+   const t=projectTotals(project);
+   const withMat=project.quoteMode==="with_material";
+   const intMat=t.mat,intLab=withMat?t.lab:t.labEx,intNet=t.net;
+-  const intCalc=calcSectionTotal(intMat,intLab,project.interiorCharges||defSectionCharges());
++  const intCalc=calcSectionTotal(intMat,intLab,project.interiorCharges||defSectionCharges(),project.projectType);
+   const extNet=calcExteriorTotals(project.exterior||[]);
+   const ec=project.exteriorConfig||defExteriorConfig();
+   const extFin=ec.finishing||defExteriorFinishing(ec.package);
+   const extMat=withMat?calcExteriorMaterialCost(extFin,extNet):0;
+   const extLab=withMat?calcExteriorLabourCost(ec,extNet):calcExteriorLabourCostExcl(ec,extNet);
+-  const extCalc=calcSectionTotal(extMat,extLab,project.exteriorCharges||defSectionCharges());
++  const extCalc=calcSectionTotal(extMat,extLab,project.exteriorCharges||defSectionCharges(),project.projectType);
+   const dwGrandTotal=calcDWTotals(project?.dwItems||[]).total;
+   const doorWindowCalc=calcDoorWindow(project?.doorWindowItems||[]);
+   const wallpaperCalc=calcWallpaper(project?.wallpaperItems||[]);
+@@ -7035,7 +7191,7 @@ export default function App() {
+ 
+                   {/* Part 7 — Exterior & Finishing Total (existing values, no new formulas) */}
+                   {(()=>{
+-                    const textureTypes=EXT_FIN_META.texture?.types||[];
++                    const textureTypes=getExtFinMeta().texture?.types||[];
+                     const finishTypeLabel=textureTypes.find(t=>t.id===finishing.texture?.type)?.label||"—";
+                     const paintCoats=finishing.paint?.coats||1;
+                     return <div style={{background:C.white,borderRadius:16,padding:"28px 26px",border:`1px solid ${C.border}`,boxShadow:"0 1px 2px rgba(15,30,60,0.05), 0 6px 16px rgba(15,30,60,0.06)"}}>
+@@ -7688,8 +7844,8 @@ export default function App() {
+             </div>
+           </div>;
+         })()}
+-        {qShowInterior&&<SectionSummaryCard title="Interior" icon="🏠" net={intNet} mat={intMat} lab={intLab} charges={project.interiorCharges||defSectionCharges()} onChargesChange={v=>up(p=>({...p,interiorCharges:v}))} color={C.blue} colorL={C.blueL}/>}
+-        {qShowExterior&&<SectionSummaryCard title="Exterior" icon="🏗" net={extNet} mat={totals.exterior.material} lab={totals.exterior.labour} charges={project.exteriorCharges||defSectionCharges()} onChargesChange={v=>up(p=>({...p,exteriorCharges:v}))} color={C.teal} colorL={C.tealL}/>}
++        {qShowInterior&&<SectionSummaryCard title="Interior" icon="🏠" net={intNet} mat={intMat} lab={intLab} charges={project.interiorCharges||defSectionCharges()} onChargesChange={v=>up(p=>({...p,interiorCharges:v}))} color={C.blue} colorL={C.blueL} projectType={project.projectType}/>}
++        {qShowExterior&&<SectionSummaryCard title="Exterior" icon="🏗" net={extNet} mat={totals.exterior.material} lab={totals.exterior.labour} charges={project.exteriorCharges||defSectionCharges()} onChargesChange={v=>up(p=>({...p,exteriorCharges:v}))} color={C.teal} colorL={C.tealL} projectType={project.projectType}/>}
+ 
+         <div style={{background:C.navy,borderRadius:14,padding:"16px 14px",marginTop:4}}>
+           {qShowInterior&&qShowExterior&&<div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:10}}>
+diff --git a/src/components/InvoiceModal.jsx b/src/components/InvoiceModal.jsx
+index f736d9d..ccc6a54 100644
+--- a/src/components/InvoiceModal.jsx
++++ b/src/components/InvoiceModal.jsx
+@@ -24,9 +24,14 @@ export default function InvoiceModal({ project, totals, onClose }) {
+     const hasGst = gstAmount > 0;
+ 
+     const matTotal =
+-      (totals?.interior ? 0 : 0) +
++      (Number(totals?.interior?.material) || 0) +
+       (Number(totals?.exterior?.material) || 0);
+-    const labTotal = Number(totals?.exterior?.labour) || 0;
++    const labTotal =
++      (Number(totals?.interior?.labour) || 0) +
++      (Number(totals?.exterior?.labour) || 0);
++    const wastageAmount = Number(totals?.wastageAmount) || 0;
++    const surfaceConditionAmount = Number(totals?.surfaceConditionAmount) || 0;
++    const scaffoldingAmount = Number(totals?.scaffoldingAmount) || 0;
+ 
+     const invoiceNo = `INV-${String(project?.id || "").slice(-6).toUpperCase()}`;
+     const date = new Date().toLocaleDateString("en-IN", {
+@@ -55,6 +60,7 @@ export default function InvoiceModal({ project, totals, onClose }) {
+     return {
+       grandTotal, grandArea, subtotal, additionalCharges, discountAmount,
+       taxableAmount, gstAmount, gstPct, hasGst, matTotal, labTotal,
++      wastageAmount, surfaceConditionAmount, scaffoldingAmount,
+       invoiceNo, date, stages, amountPaid, balanceDue, sections,
+     };
+   }, [project, totals]);
+@@ -146,10 +152,21 @@ export default function InvoiceModal({ project, totals, onClose }) {
+             </table>
+           </div>
+ 
++          {/* Material vs Labour breakdown */}
++          {(data.matTotal > 0 || data.labTotal > 0) && (
++            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 22 }}>
++              <SummaryBox label="Material Cost" value={`₹${fmt(data.matTotal)}`} color={C.teal} />
++              <SummaryBox label="Labour Cost" value={`₹${fmt(data.labTotal)}`} color={C.navy} />
++            </div>
++          )}
++
+           {/* Summary charges */}
+           <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 24 }}>
+             <div style={{ width: 280, fontSize: 12 }}>
+               <Row label="Subtotal" value={`₹${fmt(data.subtotal)}`} />
++              {data.wastageAmount > 0 && <Row label="Material Wastage Buffer" value={`₹${fmt(data.wastageAmount)}`} />}
++              {data.surfaceConditionAmount > 0 && <Row label="Surface Condition (Repaint) Surcharge" value={`₹${fmt(data.surfaceConditionAmount)}`} />}
++              {data.scaffoldingAmount > 0 && <Row label="Scaffolding Surcharge" value={`₹${fmt(data.scaffoldingAmount)}`} />}
+               {data.additionalCharges > 0 && <Row label="Additional Charges" value={`₹${fmt(data.additionalCharges)}`} />}
+               {data.discountAmount > 0 && <Row label={`Discount`} value={`−₹${fmt(data.discountAmount)}`} color={C.red} />}
+               <Row label="Taxable Amount" value={`₹${fmt(data.taxableAmount)}`} bold border />
+diff --git a/src/components/MasterRatesModal.jsx b/src/components/MasterRatesModal.jsx
+index a8a378d..ca16212 100644
+--- a/src/components/MasterRatesModal.jsx
++++ b/src/components/MasterRatesModal.jsx
+@@ -4,6 +4,8 @@ import {
+   getStoredMasterRates,
+   saveMasterRates,
+   resetMasterRates,
++  addCustomTier,
++  removeCustomTier,
+ } from "../data/finishMasterRates.ts";
+ import {
+   getSupervisorPin,
+@@ -34,6 +36,9 @@ export default function MasterRatesModal({ onClose, onSaved }) {
+   const [rates, setRates] = useState(() => getStoredMasterRates());
+   const [activeTab, setActiveTab] = useState(0);
+   const [saved, setSaved] = useState(false);
++  const [customFormKey, setCustomFormKey] = useState(null); // sub.key of the open "+ Add Custom Finish" form, or null
++  const [customName, setCustomName] = useState("");
++  const [customRate, setCustomRate] = useState("");
+   const pinRef = useRef(null);
+ 
+   useEffect(() => {
+@@ -74,6 +79,32 @@ export default function MasterRatesModal({ onClose, onSaved }) {
+     setSaved(false);
+   };
+ 
++  const openCustomForm = (subKey) => {
++    setCustomFormKey(subKey);
++    setCustomName("");
++    setCustomRate("");
++  };
++
++  const cancelCustomForm = () => {
++    setCustomFormKey(null);
++    setCustomName("");
++    setCustomRate("");
++  };
++
++  const submitCustomFinish = (catKey, subKey) => {
++    const trimmed = customName.trim();
++    if (!trimmed) return;
++    const rateNum = parseFloat(customRate);
++    setRates((prev) => addCustomTier(prev, catKey, subKey, trimmed, isNaN(rateNum) ? 0 : rateNum));
++    setSaved(false);
++    cancelCustomForm();
++  };
++
++  const deleteCustomFinish = (catKey, subKey, tierId) => {
++    setRates((prev) => removeCustomTier(prev, catKey, subKey, tierId));
++    setSaved(false);
++  };
++
+   const doSave = () => {
+     saveMasterRates(rates);
+     setSaved(true);
+@@ -352,10 +383,10 @@ export default function MasterRatesModal({ onClose, onSaved }) {
+                   <div
+                     key={tier.id}
+                     style={{
+-                      background: "#F8FAFC",
++                      background: tier.isCustom ? "#FFF8E7" : "#F8FAFC",
+                       borderRadius: 10,
+                       padding: "10px 12px",
+-                      border: `1px solid ${C.border}`,
++                      border: `1px solid ${tier.isCustom ? C.orange + "55" : C.border}`,
+                     }}
+                   >
+                     <div
+@@ -369,9 +400,29 @@ export default function MasterRatesModal({ onClose, onSaved }) {
+                         gap: 4,
+                       }}
+                     >
+-                      {tier.base === "water" && "💧 "}
+-                      {tier.base === "oil" && "🛢 "}
+-                      {tier.label}
++                      <span style={{ flex: 1 }}>
++                        {tier.base === "water" && "💧 "}
++                        {tier.base === "oil" && "🛢 "}
++                        {tier.isCustom && "⭐ "}
++                        {tier.label}
++                      </span>
++                      {tier.isCustom && (
++                        <button
++                          onClick={() => deleteCustomFinish(cat.key, sub.key, tier.id)}
++                          title="Remove custom finish"
++                          style={{
++                            background: "none",
++                            border: "none",
++                            color: C.red,
++                            fontSize: 13,
++                            fontWeight: 800,
++                            cursor: "pointer",
++                            padding: "0 2px",
++                          }}
++                        >
++                          ✕
++                        </button>
++                      )}
+                     </div>
+                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                       <span
+@@ -423,6 +474,114 @@ export default function MasterRatesModal({ onClose, onSaved }) {
+                   </div>
+                 ))}
+               </div>
++
++              {/* + Add Custom Finish */}
++              {customFormKey === sub.key ? (
++                <div
++                  style={{
++                    marginTop: 8,
++                    background: "#FFF8E7",
++                    border: `1.5px solid ${C.orange}55`,
++                    borderRadius: 10,
++                    padding: "10px 12px",
++                  }}
++                >
++                  <div style={{ display: "grid", gridTemplateColumns: "1fr 90px", gap: 8, marginBottom: 8 }}>
++                    <input
++                      type="text"
++                      autoFocus
++                      value={customName}
++                      onChange={(e) => setCustomName(e.target.value)}
++                      placeholder="e.g. Italian Marble Finish"
++                      style={{
++                        border: `1.5px solid ${C.border}`,
++                        borderRadius: 8,
++                        padding: "8px 10px",
++                        fontSize: 13,
++                        fontWeight: 600,
++                        color: C.navy,
++                        outline: "none",
++                        background: C.white,
++                        boxSizing: "border-box",
++                      }}
++                    />
++                    <input
++                      type="text"
++                      inputMode="decimal"
++                      value={customRate}
++                      onChange={(e) => {
++                        const v = e.target.value;
++                        if (v === "" || /^\d*\.?\d*$/.test(v)) setCustomRate(v);
++                      }}
++                      placeholder="₹/sf"
++                      style={{
++                        border: `1.5px solid ${C.border}`,
++                        borderRadius: 8,
++                        padding: "8px 10px",
++                        fontSize: 13,
++                        fontWeight: 700,
++                        color: C.navy,
++                        outline: "none",
++                        background: C.white,
++                        boxSizing: "border-box",
++                      }}
++                    />
++                  </div>
++                  <div style={{ display: "flex", gap: 8 }}>
++                    <button
++                      onClick={cancelCustomForm}
++                      style={{
++                        flex: 1,
++                        padding: "8px",
++                        background: C.white,
++                        color: C.gray,
++                        border: `1.5px solid ${C.border}`,
++                        borderRadius: 8,
++                        fontSize: 12,
++                        fontWeight: 700,
++                        cursor: "pointer",
++                      }}
++                    >
++                      Cancel
++                    </button>
++                    <button
++                      onClick={() => submitCustomFinish(cat.key, sub.key)}
++                      disabled={!customName.trim()}
++                      style={{
++                        flex: 1,
++                        padding: "8px",
++                        background: customName.trim() ? C.orange : "#F0E5C8",
++                        color: "#fff",
++                        border: "none",
++                        borderRadius: 8,
++                        fontSize: 12,
++                        fontWeight: 700,
++                        cursor: customName.trim() ? "pointer" : "not-allowed",
++                      }}
++                    >
++                      ✓ Add Finish
++                    </button>
++                  </div>
++                </div>
++              ) : (
++                <button
++                  onClick={() => openCustomForm(sub.key)}
++                  style={{
++                    marginTop: 8,
++                    width: "100%",
++                    padding: "9px",
++                    background: "none",
++                    border: `1.5px dashed ${C.orange}88`,
++                    borderRadius: 10,
++                    fontSize: 12,
++                    fontWeight: 700,
++                    color: C.orange,
++                    cursor: "pointer",
++                  }}
++                >
++                  + Add Custom Finish
++                </button>
++              )}
+             </div>
+           ))}
+         </div>
+diff --git a/src/data/finishMasterRates.ts b/src/data/finishMasterRates.ts
+index b3ab5ba..bd0f16c 100644
+--- a/src/data/finishMasterRates.ts
++++ b/src/data/finishMasterRates.ts
+@@ -14,6 +14,8 @@ export type FinishTier = {
+   base: FinishBase;
+   /** default per-sq.ft. rate (₹) */
+   r: number;
++  /** true for user-added finishes created via "+ Add Custom Finish" */
++  isCustom?: boolean;
+ };
+ 
+ export type FinishCategoryKey =
+@@ -333,6 +335,82 @@ export function getRateForFinish(
+   return 0;
+ }
+ 
++// ── Dynamic custom finishes ────────────────────────────────────────────────
++// User-added finishes ("+ Add Custom Finish" in Master Rates Manager). These
++// are stored as ordinary tiers (isCustom:true) inside the target sub-category
++// so they persist in localStorage alongside standard rates and are picked up
++// automatically anywhere getStoredMasterRates()/getRateForFinish() is used.
++
++function slugifyItemName(name: string): string {
++  return (name || "")
++    .toString()
++    .trim()
++    .toLowerCase()
++    .replace(/[^a-z0-9]+/g, "_")
++    .replace(/(^_|_$)/g, "") || "item";
++}
++
++/**
++ * Adds a user-defined custom finish (name + base rate) to a category's
++ * sub-category and returns a NEW rates array (does not mutate `rates`).
++ * Does not persist — call saveMasterRates(result) to write it to storage.
++ */
++export function addCustomTier(
++  rates: FinishCategory[],
++  categoryKey: FinishCategoryKey,
++  subCategoryKey: FinishSubCategoryKey,
++  name: string,
++  rate: number,
++): FinishCategory[] {
++  const trimmed = (name || "").trim();
++  if (!trimmed) return rates;
++  const id = `custom_${slugifyItemName(trimmed)}_${Date.now().toString(36)}`;
++  const newTier: FinishTier = { id, label: trimmed, base: "none", r: Number(rate) || 0, isCustom: true };
++
++  return rates.map((cat) => {
++    if (cat.key !== categoryKey) return cat;
++    return {
++      ...cat,
++      subCategories: cat.subCategories.map((sub) => {
++        if (sub.key !== subCategoryKey) return sub;
++        // insert before the built-in "custom" placeholder tier if one exists,
++        // otherwise append
++        const idx = sub.tiers.findIndex((t) => t.id === "custom");
++        const tiers =
++          idx === -1
++            ? [...sub.tiers, newTier]
++            : [...sub.tiers.slice(0, idx), newTier, ...sub.tiers.slice(idx)];
++        return { ...sub, tiers };
++      }),
++    };
++  });
++}
++
++/**
++ * Removes a previously-added custom tier by id. Refuses to remove built-in
++ * (non-custom) tiers. Returns a NEW rates array; call saveMasterRates() to persist.
++ */
++export function removeCustomTier(
++  rates: FinishCategory[],
++  categoryKey: FinishCategoryKey,
++  subCategoryKey: FinishSubCategoryKey,
++  tierId: string,
++): FinishCategory[] {
++  return rates.map((cat) => {
++    if (cat.key !== categoryKey) return cat;
++    return {
++      ...cat,
++      subCategories: cat.subCategories.map((sub) => {
++        if (sub.key !== subCategoryKey) return sub;
++        return {
++          ...sub,
++          tiers: sub.tiers.filter((t) => !(t.id === tierId && t.isCustom)),
++        };
++      }),
++    };
++  });
++}
++
+ /**
+  * Returns the full FinishTier object for a given category + tier id.
+  */

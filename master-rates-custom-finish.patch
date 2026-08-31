@@ -1,0 +1,313 @@
+diff --git a/src/components/MasterRatesModal.jsx b/src/components/MasterRatesModal.jsx
+index a8a378d..ca16212 100644
+--- a/src/components/MasterRatesModal.jsx
++++ b/src/components/MasterRatesModal.jsx
+@@ -4,6 +4,8 @@ import {
+   getStoredMasterRates,
+   saveMasterRates,
+   resetMasterRates,
++  addCustomTier,
++  removeCustomTier,
+ } from "../data/finishMasterRates.ts";
+ import {
+   getSupervisorPin,
+@@ -34,6 +36,9 @@ export default function MasterRatesModal({ onClose, onSaved }) {
+   const [rates, setRates] = useState(() => getStoredMasterRates());
+   const [activeTab, setActiveTab] = useState(0);
+   const [saved, setSaved] = useState(false);
++  const [customFormKey, setCustomFormKey] = useState(null); // sub.key of the open "+ Add Custom Finish" form, or null
++  const [customName, setCustomName] = useState("");
++  const [customRate, setCustomRate] = useState("");
+   const pinRef = useRef(null);
+ 
+   useEffect(() => {
+@@ -74,6 +79,32 @@ export default function MasterRatesModal({ onClose, onSaved }) {
+     setSaved(false);
+   };
+ 
++  const openCustomForm = (subKey) => {
++    setCustomFormKey(subKey);
++    setCustomName("");
++    setCustomRate("");
++  };
++
++  const cancelCustomForm = () => {
++    setCustomFormKey(null);
++    setCustomName("");
++    setCustomRate("");
++  };
++
++  const submitCustomFinish = (catKey, subKey) => {
++    const trimmed = customName.trim();
++    if (!trimmed) return;
++    const rateNum = parseFloat(customRate);
++    setRates((prev) => addCustomTier(prev, catKey, subKey, trimmed, isNaN(rateNum) ? 0 : rateNum));
++    setSaved(false);
++    cancelCustomForm();
++  };
++
++  const deleteCustomFinish = (catKey, subKey, tierId) => {
++    setRates((prev) => removeCustomTier(prev, catKey, subKey, tierId));
++    setSaved(false);
++  };
++
+   const doSave = () => {
+     saveMasterRates(rates);
+     setSaved(true);
+@@ -352,10 +383,10 @@ export default function MasterRatesModal({ onClose, onSaved }) {
+                   <div
+                     key={tier.id}
+                     style={{
+-                      background: "#F8FAFC",
++                      background: tier.isCustom ? "#FFF8E7" : "#F8FAFC",
+                       borderRadius: 10,
+                       padding: "10px 12px",
+-                      border: `1px solid ${C.border}`,
++                      border: `1px solid ${tier.isCustom ? C.orange + "55" : C.border}`,
+                     }}
+                   >
+                     <div
+@@ -369,9 +400,29 @@ export default function MasterRatesModal({ onClose, onSaved }) {
+                         gap: 4,
+                       }}
+                     >
+-                      {tier.base === "water" && "💧 "}
+-                      {tier.base === "oil" && "🛢 "}
+-                      {tier.label}
++                      <span style={{ flex: 1 }}>
++                        {tier.base === "water" && "💧 "}
++                        {tier.base === "oil" && "🛢 "}
++                        {tier.isCustom && "⭐ "}
++                        {tier.label}
++                      </span>
++                      {tier.isCustom && (
++                        <button
++                          onClick={() => deleteCustomFinish(cat.key, sub.key, tier.id)}
++                          title="Remove custom finish"
++                          style={{
++                            background: "none",
++                            border: "none",
++                            color: C.red,
++                            fontSize: 13,
++                            fontWeight: 800,
++                            cursor: "pointer",
++                            padding: "0 2px",
++                          }}
++                        >
++                          ✕
++                        </button>
++                      )}
+                     </div>
+                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                       <span
+@@ -423,6 +474,114 @@ export default function MasterRatesModal({ onClose, onSaved }) {
+                   </div>
+                 ))}
+               </div>
++
++              {/* + Add Custom Finish */}
++              {customFormKey === sub.key ? (
++                <div
++                  style={{
++                    marginTop: 8,
++                    background: "#FFF8E7",
++                    border: `1.5px solid ${C.orange}55`,
++                    borderRadius: 10,
++                    padding: "10px 12px",
++                  }}
++                >
++                  <div style={{ display: "grid", gridTemplateColumns: "1fr 90px", gap: 8, marginBottom: 8 }}>
++                    <input
++                      type="text"
++                      autoFocus
++                      value={customName}
++                      onChange={(e) => setCustomName(e.target.value)}
++                      placeholder="e.g. Italian Marble Finish"
++                      style={{
++                        border: `1.5px solid ${C.border}`,
++                        borderRadius: 8,
++                        padding: "8px 10px",
++                        fontSize: 13,
++                        fontWeight: 600,
++                        color: C.navy,
++                        outline: "none",
++                        background: C.white,
++                        boxSizing: "border-box",
++                      }}
++                    />
++                    <input
++                      type="text"
++                      inputMode="decimal"
++                      value={customRate}
++                      onChange={(e) => {
++                        const v = e.target.value;
++                        if (v === "" || /^\d*\.?\d*$/.test(v)) setCustomRate(v);
++                      }}
++                      placeholder="₹/sf"
++                      style={{
++                        border: `1.5px solid ${C.border}`,
++                        borderRadius: 8,
++                        padding: "8px 10px",
++                        fontSize: 13,
++                        fontWeight: 700,
++                        color: C.navy,
++                        outline: "none",
++                        background: C.white,
++                        boxSizing: "border-box",
++                      }}
++                    />
++                  </div>
++                  <div style={{ display: "flex", gap: 8 }}>
++                    <button
++                      onClick={cancelCustomForm}
++                      style={{
++                        flex: 1,
++                        padding: "8px",
++                        background: C.white,
++                        color: C.gray,
++                        border: `1.5px solid ${C.border}`,
++                        borderRadius: 8,
++                        fontSize: 12,
++                        fontWeight: 700,
++                        cursor: "pointer",
++                      }}
++                    >
++                      Cancel
++                    </button>
++                    <button
++                      onClick={() => submitCustomFinish(cat.key, sub.key)}
++                      disabled={!customName.trim()}
++                      style={{
++                        flex: 1,
++                        padding: "8px",
++                        background: customName.trim() ? C.orange : "#F0E5C8",
++                        color: "#fff",
++                        border: "none",
++                        borderRadius: 8,
++                        fontSize: 12,
++                        fontWeight: 700,
++                        cursor: customName.trim() ? "pointer" : "not-allowed",
++                      }}
++                    >
++                      ✓ Add Finish
++                    </button>
++                  </div>
++                </div>
++              ) : (
++                <button
++                  onClick={() => openCustomForm(sub.key)}
++                  style={{
++                    marginTop: 8,
++                    width: "100%",
++                    padding: "9px",
++                    background: "none",
++                    border: `1.5px dashed ${C.orange}88`,
++                    borderRadius: 10,
++                    fontSize: 12,
++                    fontWeight: 700,
++                    color: C.orange,
++                    cursor: "pointer",
++                  }}
++                >
++                  + Add Custom Finish
++                </button>
++              )}
+             </div>
+           ))}
+         </div>
+diff --git a/src/data/finishMasterRates.ts b/src/data/finishMasterRates.ts
+index b3ab5ba..a0e0cba 100644
+--- a/src/data/finishMasterRates.ts
++++ b/src/data/finishMasterRates.ts
+@@ -9,6 +9,8 @@
+ export type FinishBase = "water" | "oil" | "none";
+ 
+ export type FinishTier = {
++  /** true for user-added finishes created via "+ Add Custom Finish" */
++  isCustom?: boolean;
+   id: string;
+   label: string;
+   base: FinishBase;
+@@ -333,6 +335,82 @@ export function getRateForFinish(
+   return 0;
+ }
+ 
++// ── Dynamic custom finishes ────────────────────────────────────────────────
++// User-added finishes ("+ Add Custom Finish" in Master Rates Manager). These
++// are stored as ordinary tiers (isCustom:true) inside the target sub-category
++// so they persist in localStorage alongside standard rates and are picked up
++// automatically anywhere getStoredMasterRates()/getRateForFinish() is used.
++
++function slugifyItemName(name: string): string {
++  return (name || "")
++    .toString()
++    .trim()
++    .toLowerCase()
++    .replace(/[^a-z0-9]+/g, "_")
++    .replace(/(^_|_$)/g, "") || "item";
++}
++
++/**
++ * Adds a user-defined custom finish (name + base rate) to a category's
++ * sub-category and returns a NEW rates array (does not mutate `rates`).
++ * Does not persist — call saveMasterRates(result) to write it to storage.
++ */
++export function addCustomTier(
++  rates: FinishCategory[],
++  categoryKey: FinishCategoryKey,
++  subCategoryKey: FinishSubCategoryKey,
++  name: string,
++  rate: number,
++): FinishCategory[] {
++  const trimmed = (name || "").trim();
++  if (!trimmed) return rates;
++  const id = `custom_${slugifyItemName(trimmed)}_${Date.now().toString(36)}`;
++  const newTier: FinishTier = { id, label: trimmed, base: "none", r: Number(rate) || 0, isCustom: true };
++
++  return rates.map((cat) => {
++    if (cat.key !== categoryKey) return cat;
++    return {
++      ...cat,
++      subCategories: cat.subCategories.map((sub) => {
++        if (sub.key !== subCategoryKey) return sub;
++        // insert before the built-in "custom" placeholder tier if one exists,
++        // otherwise append
++        const idx = sub.tiers.findIndex((t) => t.id === "custom");
++        const tiers =
++          idx === -1
++            ? [...sub.tiers, newTier]
++            : [...sub.tiers.slice(0, idx), newTier, ...sub.tiers.slice(idx)];
++        return { ...sub, tiers };
++      }),
++    };
++  });
++}
++
++/**
++ * Removes a previously-added custom tier by id. Refuses to remove built-in
++ * (non-custom) tiers. Returns a NEW rates array; call saveMasterRates() to persist.
++ */
++export function removeCustomTier(
++  rates: FinishCategory[],
++  categoryKey: FinishCategoryKey,
++  subCategoryKey: FinishSubCategoryKey,
++  tierId: string,
++): FinishCategory[] {
++  return rates.map((cat) => {
++    if (cat.key !== categoryKey) return cat;
++    return {
++      ...cat,
++      subCategories: cat.subCategories.map((sub) => {
++        if (sub.key !== subCategoryKey) return sub;
++        return {
++          ...sub,
++          tiers: sub.tiers.filter((t) => !(t.id === tierId && t.isCustom)),
++        };
++      }),
++    };
++  });
++}
++
+ /**
+  * Returns the full FinishTier object for a given category + tier id.
+  */
