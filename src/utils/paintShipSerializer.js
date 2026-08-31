@@ -372,7 +372,7 @@ export function serializeMasterJSON(projectData) {
     }
   };
 
-  const validationResult = MasterJSONSchema.safeParse(normalizedData);
+  let validationResult = MasterJSONSchema.safeParse(normalizedData);
 
   if (!validationResult.success) {
     console.error("Master JSON Schema Validation Errors:", JSON.stringify(validationResult.error.errors || validationResult.error, null, 2));
