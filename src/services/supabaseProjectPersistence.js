@@ -195,12 +195,14 @@ export async function saveProject(project) {
   });
 
   // 2. Projects Table Sync
-  const exteriors = project.exteriorWork?.sides || project.exteriorSides || project.exteriors || serializedProject?.exteriors || [];
+  // Exterior sides: prefer the explicitly-bound exteriorSides array from the
+  // UI payload (computed in doSave), then fall back to nested/legacy shapes.
+  const exteriors = project.exteriorSides || project.exteriorWork?.sides || project.exteriors || serializedProject?.exteriorWork?.sides || [];
   const joinery = project.woodAndMetalItems || project.joineryItems || project.joinery || serializedProject?.woodAndMetalItems || [];
   const rooms = project.floors?.flatMap(f => f.rooms || []) || project.rooms || [];
   const calcExteriorSqFt = exteriors.reduce((acc, item) => acc + Number(item.netSqFt || item.net_sqft || item.area || 0), 0);
   const calcInteriorSqFt = rooms.reduce((acc, r) => acc + Number(r.carpetArea || r.area || r.sqft || 0), 0);
-  const calcDoorsWindows = joinery.reduce((acc, j) => acc + Number(j.quantity || j.qty || 1), 0);
+  const calcDoorsWindows = joinery.reduce((acc, j) => acc + Number(j.dimensions?.qty || j.quantity || j.qty || 1), 0);
 
   const projectPayload = {
     id: projectId,
@@ -254,8 +256,7 @@ export async function saveProject(project) {
   // 4. Project Exteriors Sync
   try {
     await supabase.from("project_exteriors").delete().eq("project_id", projectId);
-    console.log("EXTERIOR DATA SOURCES:", project.exteriorWork, project.exteriors, serializedProject?.exteriors);
-    const exteriorsList = project.exteriorWork?.sides || project.exteriorSides || project.exteriors || serializedProject?.exteriorWork?.sides || serializedProject?.exteriors || [];
+    const exteriorsList = project.exteriorSides || project.exteriorWork?.sides || project.exteriors || serializedProject?.exteriorWork?.sides || [];
     const exteriorPayload = exteriorsList.map((ext) => ({
       id: ext.id || crypto.randomUUID(),
       project_id: projectId,
@@ -269,7 +270,7 @@ export async function saveProject(project) {
       if (extError) console.error("[supabaseProjectPersistence] Exteriors insert error:", extError);
     }
   } catch (e) {
-    console.error("[supabaseProjectPersistence] Exteriors insert error:", e);
+    if (import.meta.env.DEV) console.error("[supabaseProjectPersistence] Exteriors insert error:", e);
   }
 
   // 5. Project Joinery Items Sync
@@ -278,6 +279,7 @@ export async function saveProject(project) {
     const joineryItems = project.woodAndMetalItems || project.joineryItems || project.joinery || serializedProject?.woodAndMetalItems || [];
     if (joineryItems.length > 0) {
       const joineryToInsert = joineryItems.map((item) => ({
+        id: crypto.randomUUID(),
         project_id: projectId,
         item_id: item?.itemId || item?.id || "",
         item_type: item?.itemType || item?.type || "",
@@ -296,15 +298,16 @@ export async function saveProject(project) {
       if (joineryError) console.error("[supabaseProjectPersistence] Joinery insert error:", joineryError);
     }
   } catch (e) {
-    console.error("[supabaseProjectPersistence] Joinery insert error:", e);
+    if (import.meta.env.DEV) console.error("[supabaseProjectPersistence] Joinery insert error:", e);
   }
 
   // 6. Project Warranties Sync
   try {
     await supabase.from("project_warranties").delete().eq("project_id", projectId);
-    const warranties = project.warranties || serializedProject.warranties || [];
+    const warranties = project.warranties || serializedProject?.warranties || [];
     if (warranties.length > 0) {
       const warrantiesToInsert = warranties.map((w) => ({
+        id: crypto.randomUUID(),
         project_id: projectId,
         system_name: w?.system_name || w?.systemName || "",
         warranty_years: Number(w?.warranty_years || w?.years || 0),
@@ -314,7 +317,7 @@ export async function saveProject(project) {
       if (warrantyError) console.error("[supabaseProjectPersistence] Warranties insert error:", warrantyError);
     }
   } catch (e) {
-    console.error("[supabaseProjectPersistence] Warranties insert error:", e);
+    if (import.meta.env.DEV) console.error("[supabaseProjectPersistence] Warranties insert error:", e);
   }
 
   // 7. Snapshots Sync (Safe Payload to prevent NULL constraints)

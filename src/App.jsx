@@ -7349,6 +7349,89 @@ export default function App() {
 
       const activeId = project?.id && project.id !== 'ejku09i' ? project.id : "proj_" + Date.now();
 
+      // Build exterior sides from live project state so the persistence layer
+      // receives the computed elevation array (not just the raw exterior data).
+      const extConfig = project?.exteriorConfig || defExteriorConfig();
+      const extSides = ELEVATIONS.map(name => {
+        const elevation = (project?.exterior || []).find(el => el.name === name) || {
+          name, sections: [], deductions: [], additions: [],
+          condition: "Good", conditionIssues: [], conditionNotes: "",
+          exteriorOverride: defExteriorOverride()
+        };
+        const cfg = resolveExteriorConfig(elevation, extConfig);
+        const fin = cfg.finishing || {};
+        let net = calcExteriorElevationNet(elevation) || 0;
+        const extScopeActive = (project?.scope === "exterior" || project?.scope === "both") &&
+          (project?.exterior || []).some(e => (e.sections || []).some(s => (s.w || 0) > 0));
+        if (extScopeActive && net === 0) net = 400;
+        return {
+          sideName: name + " Elevation",
+          netSqft: net,
+          condition: elevation.condition || "Good",
+          hasIssues: (elevation.conditionIssues && elevation.conditionIssues.length > 0) ||
+            (elevation.condition && elevation.condition !== "Good") || false,
+          isExterior: true,
+          finishingSteps: [
+            { key: "putty", service: "Putty" },
+            { key: "primer", service: "Primer" },
+            { key: "paint", service: "Paint" },
+            { key: "protection", service: "Protection" },
+            { key: "texture", service: "Texture" },
+          ].filter(t => { const f = fin[t.key]; return f && f.on; })
+            .map((t, idx) => {
+              const f = fin[t.key];
+              return { stepOrder: idx + 1, service: t.service, product: f?.customName || t.service, coats: f?.coats || 1, enabled: true };
+            })
+        };
+      });
+
+      // Build woodAndMetalItems from live doorWindowItems + polishItems so the
+      // persistence layer receives the unified joinery array.
+      const floorRoomMap = {};
+      (project?.floors || []).forEach(fl => {
+        floorRoomMap[fl.id] = fl.name;
+        (fl.rooms || []).forEach(r => { floorRoomMap[r.id] = r.type; });
+      });
+      function joineryLocation(it) {
+        const floorName = it.floorId ? (floorRoomMap[it.floorId] || "Ground Floor") : "Ground Floor";
+        let roomName = "Living Room";
+        if (it.roomId) roomName = floorRoomMap[it.roomId] || roomName;
+        else if (it.location) roomName = it.location;
+        return { floorName, roomName };
+      }
+      const woodAndMetalItems = (project?.doorWindowItems || []).map(item => {
+        const loc = joineryLocation(item);
+        const w = Number(item.length) || 0;
+        const h = Number(item.height) || 0;
+        const q = Number(item.qty) || 1;
+        return {
+          itemId: item.id || `dw_${Date.now()}`,
+          itemType: item.itemType || "Door",
+          customLabel: item.customType || item.label || item.customLabel || "",
+          location: loc,
+          dimensions: { widthFt: w, heightFt: h, qty: q, totalSqft: w * h * q },
+          finishType: item.finishType || "oil_paint",
+          productName: item.productName || item.product || "Synthetic Enamel",
+          coats: item.coats || 2
+        };
+      });
+      (project?.polishItems || []).forEach(item => {
+        const loc = joineryLocation(item);
+        const w = Number(item.l) || 0;
+        const h = Number(item.h) || 0;
+        const q = Number(item.qty) || 1;
+        woodAndMetalItems.push({
+          itemId: item.id || `pol_${Date.now()}`,
+          itemType: item.category || "Wood Polish",
+          customLabel: item.label || "",
+          location: loc,
+          dimensions: { widthFt: w, heightFt: h, qty: q, totalSqft: w * h * q },
+          finishType: item.finishId || "polish",
+          productName: item.productName || item.product || "Polish",
+          coats: item.coats || 2
+        });
+      });
+
       const payload = {
         ...project,
         id: activeId,
@@ -7360,6 +7443,9 @@ export default function App() {
         scope: project?.scope || "",
         floors: project?.floors || [],
         exterior: project?.exterior || [],
+        exteriorSides: extSides,
+        woodAndMetalItems: woodAndMetalItems,
+        warranties: project?.warranties || [],
         grandTotal: computedTotal || project?.grandTotal || project?.totalAmount || 0,
         totalAmount: computedTotal || project?.totalAmount || 0,
         totalArea: computedArea || project?.totalArea || 0,
