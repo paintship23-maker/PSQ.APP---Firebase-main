@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { auth, firebaseConfigured } from "./firebase";
 import { RecaptchaVerifier, signInWithPhoneNumber, signOut } from "firebase/auth";
-import { saveProject, saveProjectData, loadProject, getProjectData, loadAllProjects, deleteProject } from "./services/projectPersistence";
+import { saveProject, saveProjectData, loadProject, getProjectData, loadAllProjects, deleteProject } from "./services/supabaseProjectPersistence";
 import Header from "./components/Header.jsx";
 import MeasurementView from "./components/MeasurementView.jsx";
 import InvoiceModal from "./components/InvoiceModal.jsx";
